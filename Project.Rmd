@@ -1,0 +1,203 @@
+---
+title: "CourseProject"
+output: html_document
+---
+
+##Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset)
+
+##Data
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+```{r, message=FALSE, warning=FALSE}
+#set working directory
+setwd("~/R/MachineLearning/Project")
+#load the data
+#https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+train <- read.csv("./pml-training.csv", header=TRUE,na.strings=c("NA","#DIV/0!", ""))
+#https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+test <- read.csv("./pml-testing.csv", header=TRUE,na.strings=c("NA","#DIV/0!", ""))
+
+#reproducibility
+set.seed(1357)
+```
+
+
+##Project Goal
+
+Predict the manner in which this group of people did the exercise. This is the "classe" variable in the training set. 
+Also, create a report describing how the model was built, how cross validation was used and what the expected out of sample error is. 
+
+
+##Cleaning the data
+
+```{r, message=FALSE, warning=FALSE}
+#libraries
+library(gender)
+library(genderdata)
+library(ggplot2)
+library(plotrix)
+library(xtable)
+library(caret)
+library(randomForest)
+library(rpart) 
+library(rpart.plot)
+library(plotly)
+```
+
+
+First, we start analyzing our users
+
+```{r, message=FALSE, warning=FALSE}
+#how many users are we analyzing
+users <- as.data.frame(unique(train$user_name))
+names(users)<- c("User")
+users
+#gender of the users
+train$user_name <- as.character(train$user_name)
+FirstName <- unique(train$user_name)
+Gender <- gender(FirstName, years = c(1950, 2012), method = c("ssa", "ipums", "napp",                                                "kantrowitz", "genderize", "demo"), countries = "United States")
+Gender <- Gender$gender
+mytable <- table(Gender)
+pct <- round(mytable/sum(mytable)*100)
+lbls <- names(mytable)
+lbls <- paste(lbls,pct) #add percents to labels
+lbls <- paste(lbls,"%",sep="") #ad % to labels
+pie3D(mytable, labels=lbls, explode=0.1,col=c("turquoise1","plum1"), main="Gender Distribution")
+```
+
+The exercises were performed by six male participants 
+
+
+##Feature Selection
+
+First we clean up near zero variance features, columns with missing values and descriptive fields.
+Features with all missing values will be discarded as well as features that are irrelevant.
+
+```{r, message=FALSE, warning=FALSE}
+##How many NA's are in each variable 
+na<- 0
+for (i in 1:length(names(train))){
+na[i] <- sum(is.na(train[,i]))
+}
+nas <- as.matrix(cbind(names(train),na))
+names(nas) <- c("Variable","Count")
+
+# exclude near zero variance features
+nzvcol <- nearZeroVar(train)
+train <- train[, -nzvcol]
+
+#we also remove the user_name and the variables with timing and variables with more than 40% missing data
+cntlength <- sapply(train, function(x) {
+    sum(!(is.na(x) | x == ""))
+})
+nullcol <- names(cntlength[cntlength < 0.6 * length(train$classe)])
+descriptcol <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", 
+    "cvtd_timestamp", "new_window", "num_window")
+excludecols <- c(descriptcol, nullcol)
+train <- train[, !names(train) %in% excludecols]
+
+
+
+```
+
+
+
+
+##Exploratory Analysis
+
+
+We continue analyzing our outcome variable "classes"
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+
+```{r, message=FALSE, warning=FALSE}
+class <- table(train$classe)
+barplot(class, main="Dumbell Bicep Curl fashions", xlab="Classe", ylab="Frecuency", density=c(70,10))
+```
+
+Classe A is the most frequent with more than 5000 occurences while classe D is the least frequent with about 3200 occurrences
+
+
+
+##Predictions
+
+The objective of predictions will be maximize the accuracy and minimize the out-of-sample error. 
+Different models will be tested, the one with the highest accuracy will be chosen as the final model. 
+
+###Cross-Validation
+
+We have a large sample size in the Training data set. This allow us to divide our Training sample into subTraining and subTesting to allow cross-validation.
+Cross-validation will be performed by subsampling our training data set randomly without replacement into 2 subsamples: subTraining data (70% of the original Training data set) and subTesting data (30%). The models will be fitted on the subTraining data set, and tested on the subTesting data. Once the most accurate model is choosen, it will be tested on the original Testing data set.
+
+###Out-of sample error
+
+The expected out-of-sample error will correspond to the quantity: 1-accuracy in the cross-validation data. Accuracy is the proportion of correct classified observation over the total sample in the subTesting data set. Expected accuracy is the expected accuracy in the out-of-sample data set (i.e. original testing data set). Thus, the expected value of the out-of-sample error will correspond to the expected number of missclassified observations/total observations in the Test data set, which is the quantity: 1-accuracy found from the cross-validation data set.
+
+
+In order to perform cross-validation, the training data set is partionned into 2 sets: subTraining (70%) and subTest (30%).
+This will be performed using random subsampling without replacement.
+```{r}
+samples <- createDataPartition(y=train$classe, p=0.70, list=FALSE)
+subTrain <- train[samples, ] 
+subTest <- train[-samples, ]
+```
+
+
+####Decision Tree
+
+```{r}
+set.seed(1357)
+tree <- rpart(classe ~ ., data=subTrain, method="class")
+predictionTree <- predict(tree, subTest, type = "class")
+rpart.plot(tree, main="Classification Tree", extra=102, under=TRUE, faclen=0)
+confusionMatrix(predictionTree, subTest$classe)
+```
+
+Accuracy: 0.7336
+
+####Random Forest
+
+```{r}
+rf <- randomForest(classe ~. , data=subTrain, method="class")
+predictionRf <- predict(rf, subTest, type = "class")
+confusionMatrix(predictionRf, subTest$classe)
+```
+
+Accuracy: 0.994
+
+Random Forest algorithm performed better with an accuracy of 0.995 compared tho 0.73 for the Decision Tree. The expected out of sample error is 0.005 (0.5%).
+
+
+##Apply in Test set
+```{r}
+predFinal <- predict(rf, test, type="class")
+predFinal
+```
+
+
+
+```{r}
+# Write files for submission
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(predFinal)
+```
+
+
+
+
+##Bibliography
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4G06ayY66
